@@ -1,7 +1,15 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useNotification } from "../contexts/NotificationContext";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import {
+  collection,
+  getDocs,
+  query,
+  where,
+  doc,
+  getDoc,
+  updateDoc,
+} from "firebase/firestore";
 import { db } from "../firebase";
 import { Material } from "../interfaces/Material";
 import { Module } from "../interfaces/Module";
@@ -16,32 +24,215 @@ export default function MaterialsViewer({
   role,
   courseId,
 }: MaterialsViewerProps) {
-  const { userData } = useAuth();
+  const { userData, currentUser } = useAuth();
   const { showNotification } = useNotification();
 
+  // State initialization with proper initial values
   const [modules, setModules] = useState<Module[]>([]);
   const [materials, setMaterials] = useState<Material[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedModule, setSelectedModule] = useState<string>("");
-
-  // Get courseId from localStorage if not provided directly
   const [viewingCourseId, setViewingCourseId] = useState<string | undefined>(
-    courseId
+    courseId || localStorage.getItem("viewingCourseId") || undefined
   );
 
-  // Update viewingCourseId when localStorage changes
-  useEffect(() => {
-    if (role === "student" && !courseId) {
-      const storedCourseId = localStorage.getItem("viewingCourseId");
-      if (storedCourseId) {
-        setViewingCourseId(storedCourseId);
-      }
-    }
-  }, [role, courseId]);
+  // Test function to check what modules exist in Firestore
+  const testQueryAllModules = async () => {
+    try {
+      console.log("DEBUG: TESTING - Direct query of all modules in Firestore");
+      const modulesCollection = collection(db, "modules");
+      const snapshot = await getDocs(modulesCollection);
 
-  // Load modules when component mounts or viewingCourseId changes
+      const allModules = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        const module: Module = {
+          id: doc.id,
+          title: data.title || "",
+          description: data.description || "",
+          duration: data.duration || 0,
+          credits: data.credits || 0,
+          courseId: data.courseId || "",
+          prerequisites: data.prerequisites || [],
+          learningOutcomes: data.learningOutcomes || [],
+          assessmentMethods: data.assessmentMethods || [],
+          createdAt: data.createdAt
+            ? new Date(data.createdAt.seconds * 1000)
+            : new Date(),
+          updatedAt: data.updatedAt
+            ? new Date(data.updatedAt.seconds * 1000)
+            : new Date(),
+        };
+        return module;
+      });
+
+      console.log("DEBUG: TESTING - All modules query results:", {
+        empty: snapshot.empty,
+        size: snapshot.size,
+        docs: allModules,
+      });
+
+      // Log each module's complete data for debugging
+      console.log("DEBUG: TESTING - Complete module data:");
+      allModules.forEach((module) => {
+        console.log(`Module ${module.id}:`, module);
+      });
+
+      if (viewingCourseId) {
+        console.log(
+          `DEBUG: TESTING - Looking for modules with courseId = "${viewingCourseId}"`
+        );
+        const matchingModules = allModules.filter(
+          (module) => module.courseId === viewingCourseId
+        );
+        console.log(
+          `DEBUG: TESTING - Found ${matchingModules.length} matching modules:`,
+          matchingModules
+        );
+      }
+    } catch (error) {
+      console.error("DEBUG: TESTING - Error querying all modules:", error);
+    }
+  };
+
+  // Test function to check what materials exist in Firestore
+  const testQueryAllMaterials = async () => {
+    try {
+      console.log(
+        "DEBUG: TESTING - Direct query of all materials in Firestore"
+      );
+      const materialsCollection = collection(db, "materials");
+      const snapshot = await getDocs(materialsCollection);
+
+      const allMaterials = snapshot.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+      }));
+
+      console.log("DEBUG: TESTING - All materials query results:", {
+        empty: snapshot.empty,
+        size: snapshot.size,
+        docs: allMaterials,
+      });
+    } catch (error) {
+      console.error("DEBUG: TESTING - Error querying all materials:", error);
+    }
+  };
+
+  // Test function to check enrolled courses for current student
+  const testQueryEnrolledCourses = async () => {
+    try {
+      console.log("DEBUG: TESTING - Current user data:", userData);
+
+      if (!currentUser?.uid) {
+        console.log("DEBUG: TESTING - No current user UID available");
+        return;
+      }
+
+      console.log(
+        "DEBUG: TESTING - Querying enrollments for student:",
+        currentUser.uid
+      );
+      const enrollmentsCollection = collection(db, "enrollments");
+      const enrollmentsQuery = query(
+        enrollmentsCollection,
+        where("studentId", "==", currentUser.uid)
+      );
+      const enrollmentsSnapshot = await getDocs(enrollmentsQuery);
+
+      console.log("DEBUG: TESTING - Student enrollments:", {
+        empty: enrollmentsSnapshot.empty,
+        size: enrollmentsSnapshot.size,
+        enrollments: enrollmentsSnapshot.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        })),
+      });
+
+      // Now check each course
+      if (!enrollmentsSnapshot.empty) {
+        await checkModulesForEnrollments(enrollmentsSnapshot);
+      }
+    } catch (error) {
+      console.error("DEBUG: TESTING - Error querying enrollments:", error);
+    }
+  };
+
+  // Helper function to check modules for enrollments
+  const checkModulesForEnrollments = async (enrollmentsSnapshot: any) => {
+    for (const enrollDoc of enrollmentsSnapshot.docs) {
+      const enrollData = enrollDoc.data();
+      console.log(
+        `DEBUG: TESTING - Checking modules for course: ${enrollData.courseId}`
+      );
+
+      const modulesRef = collection(db, "modules");
+      const moduleSnapshot = await getDocs(modulesRef);
+
+      // Map and filter modules
+      const matchingModules = moduleSnapshot.docs
+        .map((doc) => {
+          const data = doc.data();
+          const module: Module = {
+            id: doc.id,
+            title: data.title || "",
+            description: data.description || "",
+            duration: data.duration || 0,
+            credits: data.credits || 0,
+            courseId: data.courseId || "",
+            prerequisites: data.prerequisites || [],
+            learningOutcomes: data.learningOutcomes || [],
+            assessmentMethods: data.assessmentMethods || [],
+            createdAt: data.createdAt
+              ? new Date(data.createdAt.seconds * 1000)
+              : new Date(),
+            updatedAt: data.updatedAt
+              ? new Date(data.updatedAt.seconds * 1000)
+              : new Date(),
+          };
+          return module;
+        })
+        .filter((module) => module.courseId === enrollData.courseId);
+
+      console.log(
+        `DEBUG: TESTING - Modules for course ${enrollData.courseId}:`,
+        {
+          total: moduleSnapshot.size,
+          matching: matchingModules.length,
+          modules: matchingModules,
+        }
+      );
+    }
+  };
+
+  // Run test queries on component mount
   useEffect(() => {
-    fetchModules();
+    testQueryAllModules();
+    testQueryAllMaterials();
+    testQueryEnrolledCourses();
+  }, [currentUser]); // Changed dependency to currentUser
+
+  // Update viewingCourseId when props or localStorage changes
+  useEffect(() => {
+    const newCourseId = courseId || localStorage.getItem("viewingCourseId");
+    console.log("DEBUG: Updating viewingCourseId:", {
+      courseId,
+      storedCourseId: localStorage.getItem("viewingCourseId"),
+      newCourseId,
+      currentViewingCourseId: viewingCourseId,
+    });
+
+    if (newCourseId && newCourseId !== viewingCourseId) {
+      console.log("DEBUG: Setting new viewingCourseId:", newCourseId);
+      setViewingCourseId(newCourseId);
+    }
+  }, [courseId]);
+
+  // Load modules when viewingCourseId changes
+  useEffect(() => {
+    console.log("DEBUG: viewingCourseId effect triggered:", viewingCourseId);
+    if (viewingCourseId) {
+      fetchModules();
+    }
   }, [viewingCourseId]);
 
   // Load materials when selected module changes
@@ -57,29 +248,68 @@ export default function MaterialsViewer({
   const fetchModules = async () => {
     try {
       setLoading(true);
-      let modulesQuery;
+      console.log("DEBUG: fetchModules starting with:", {
+        role,
+        viewingCourseId,
+        userData,
+      });
 
-      if (viewingCourseId) {
-        // If viewingCourseId is provided, fetch only modules for that course
-        modulesQuery = query(
-          collection(db, "modules"),
-          where("courseId", "==", viewingCourseId)
+      // Query all modules
+      const modulesRef = collection(db, "modules");
+      const modulesSnapshot = await getDocs(modulesRef);
+
+      // Process all modules from Firestore
+      const allModules = modulesSnapshot.docs.map((doc) => {
+        const data = doc.data();
+        const module: Module = {
+          id: doc.id,
+          title: data.title || "",
+          description: data.description || "",
+          duration: data.duration || 0,
+          credits: data.credits || 0,
+          courseId: data.courseId || "",
+          prerequisites: data.prerequisites || [],
+          learningOutcomes: data.learningOutcomes || [],
+          assessmentMethods: data.assessmentMethods || [],
+          createdAt: data.createdAt
+            ? new Date(data.createdAt.seconds * 1000)
+            : new Date(),
+          updatedAt: data.updatedAt
+            ? new Date(data.updatedAt.seconds * 1000)
+            : new Date(),
+        };
+        return module;
+      });
+
+      console.log("DEBUG: All modules:", {
+        total: modulesSnapshot.size,
+        modules: allModules,
+      });
+
+      // For students, we should filter by courseId or by student enrollments
+      // For lecturers, we can show all modules
+      let modulesToShow = allModules;
+
+      if (role === "student" && viewingCourseId) {
+        // Try to filter by courseId, but if none match, show all modules
+        const filteredModules = allModules.filter(
+          (module) => module.courseId === viewingCourseId
         );
-        console.log("Fetching modules for course:", viewingCourseId);
-      } else {
-        // Otherwise fetch all modules (for lecturers)
-        modulesQuery = collection(db, "modules");
-        console.log("Fetching all modules");
+
+        console.log("DEBUG: Filtered modules:", {
+          filtered: filteredModules.length,
+          modules: filteredModules,
+        });
+
+        // If we have matching modules, use the filtered list
+        if (filteredModules.length > 0) {
+          modulesToShow = filteredModules;
+        } else {
+          console.log("DEBUG: No modules match courseId, showing all modules");
+        }
       }
 
-      const moduleSnapshot = await getDocs(modulesQuery);
-      const moduleList = moduleSnapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      })) as Module[];
-
-      console.log("Modules found:", moduleList.length);
-      setModules(moduleList);
+      setModules(modulesToShow);
     } catch (error) {
       console.error("Error fetching modules:", error);
       showNotification("Failed to load modules");
@@ -192,17 +422,71 @@ export default function MaterialsViewer({
     }
   };
 
+  // Function to update modules with courseId
+  const updateModulesWithCourseId = async () => {
+    try {
+      console.log("DEBUG: Starting module updates...");
+      const modulesRef = collection(db, "modules");
+      const modulesSnapshot = await getDocs(modulesRef);
+
+      // Update each module
+      const updatePromises = modulesSnapshot.docs.map(async (docSnapshot) => {
+        const moduleData = docSnapshot.data();
+        const moduleRef = doc(db, "modules", docSnapshot.id);
+
+        // Only update if courseId is not set
+        if (!moduleData.courseId) {
+          console.log(
+            `DEBUG: Updating module ${docSnapshot.id} with courseId ${viewingCourseId}`
+          );
+          return updateDoc(moduleRef, {
+            courseId: viewingCourseId,
+          });
+        }
+        return Promise.resolve();
+      });
+
+      await Promise.all(updatePromises);
+      console.log("DEBUG: All modules updated successfully");
+
+      // Refresh the modules list
+      fetchModules();
+    } catch (error) {
+      console.error("Error updating modules:", error);
+      showNotification("Failed to update modules");
+    }
+  };
+
+  // Add button to trigger update in the UI
+  const renderUpdateButton = () => {
+    if (role === "lecturer") {
+      return (
+        <button
+          className="btn btn-warning btn-sm ms-2"
+          onClick={updateModulesWithCourseId}
+        >
+          <i className="bi bi-arrow-clockwise me-1"></i>
+          Update Module Assignments
+        </button>
+      );
+    }
+    return null;
+  };
+
   return (
     <div className="container-fluid">
       <div className="row mb-4">
         <div className="col-md-12">
           <div className="card">
             <div className="card-body">
-              <h5 className="card-title">
-                <i className="bi bi-file-earmark-text me-2"></i>
-                Course Materials
-              </h5>
-              <p className="text-muted">
+              <div className="d-flex justify-content-between align-items-center">
+                <h5 className="card-title mb-0">
+                  <i className="bi bi-file-earmark-text me-2"></i>
+                  Course Materials
+                </h5>
+                {renderUpdateButton()}
+              </div>
+              <p className="text-muted mt-2">
                 View and download educational materials for your modules.
               </p>
             </div>
