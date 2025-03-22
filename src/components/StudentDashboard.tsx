@@ -31,6 +31,7 @@ interface Schedule {
   date: string;
   dayOfWeek: string;
   isRecurring: boolean;
+  moduleId?: string;
 }
 
 // Define Course interface
@@ -77,6 +78,9 @@ export default function StudentDashboard() {
   >([]);
   const [coursesLoading, setCoursesLoading] = useState(true);
 
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
   // Profile state
   const [isEditing, setIsEditing] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -102,9 +106,26 @@ export default function StudentDashboard() {
     setMobileOpen(!mobileOpen);
   };
 
+  // Check for authentication
   useEffect(() => {
-    if (!userData) {
+    if (!userData || !currentUser?.uid) {
+      console.log("User not authenticated, redirecting to login");
       navigate("/login");
+      return;
+    }
+
+    console.log("User authenticated:", {
+      uid: currentUser.uid,
+      userData: userData,
+    });
+
+    setIsAuthenticated(true);
+  }, [userData, currentUser, navigate]);
+
+  useEffect(() => {
+    // Only proceed if user is authenticated
+    if (!isAuthenticated || !currentUser?.uid) {
+      console.log("Skipping data fetch - user not authenticated");
       return;
     }
 
@@ -112,8 +133,11 @@ export default function StudentDashboard() {
     async function fetchStudentSchedules() {
       try {
         setSchedulesLoading(true);
+        console.log("Fetching student schedules for user:", currentUser.uid);
         // This is a placeholder - you would typically filter based on student's branch, class, etc.
         const schedulesCollection = collection(db, "schedules");
+
+        // Simple query without complex ordering for now to avoid index issues
         const scheduleSnapshot = await getDocs(schedulesCollection);
 
         const scheduleList = scheduleSnapshot.docs.map(
@@ -124,6 +148,7 @@ export default function StudentDashboard() {
             } as Schedule)
         );
 
+        console.log(`Fetched ${scheduleList.length} schedules`);
         setSchedules(scheduleList);
         // Show success message using notification system
         if (scheduleList.length > 0) {
@@ -141,10 +166,15 @@ export default function StudentDashboard() {
 
     // Fetch enrolled courses
     async function fetchEnrolledCourses() {
-      if (!currentUser) return;
+      if (!currentUser?.uid) {
+        console.log("No user ID available, cannot fetch enrollments");
+        setCoursesLoading(false);
+        return;
+      }
 
       try {
         setCoursesLoading(true);
+        console.log("Fetching enrollments for student:", currentUser.uid);
 
         // Get student enrollments
         const enrollmentsCollection = collection(db, "enrollments");
@@ -200,7 +230,211 @@ export default function StudentDashboard() {
     }
 
     fetchEnrolledCourses();
-  }, [userData, navigate, showNotification, currentUser]);
+  }, [userData, navigate, showNotification, currentUser, isAuthenticated]);
+
+  // Fetch class schedules for the student
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser?.uid) {
+      console.log("Skipping class schedules fetch - user not authenticated");
+      return;
+    }
+
+    // Define function to fetch class schedules
+    async function fetchClassSchedules() {
+      try {
+        setSchedulesLoading(true);
+        console.log("Fetching class schedules for user:", currentUser.uid);
+
+        // Get all schedules without complex ordering (no index required)
+        const schedulesCollection = collection(db, "schedules");
+        const schedulesSnapshot = await getDocs(schedulesCollection);
+
+        if (schedulesSnapshot.empty) {
+          console.log("No schedules found in Firestore");
+
+          // If in development, add demo schedules
+          if (process.env.NODE_ENV === "development") {
+            console.log("Adding demo schedules for testing");
+            const demoSchedules: Schedule[] = [
+              {
+                id: "demo1",
+                moduleTitle: "Introduction to Programming",
+                floorNumber: "2",
+                classroomNumber: "201",
+                lecturerName: "Dr. Smith",
+                branch: "Main Campus",
+                startTime: "09:00",
+                endTime: "10:30",
+                date: new Date().toISOString().split("T")[0], // Today
+                dayOfWeek: new Date().toLocaleDateString("en-US", {
+                  weekday: "long",
+                }),
+                isRecurring: true,
+                moduleId: "demo-module-1",
+              },
+              {
+                id: "demo2",
+                moduleTitle: "Web Development",
+                floorNumber: "3",
+                classroomNumber: "305",
+                lecturerName: "Prof. Johnson",
+                branch: "Tech Building",
+                startTime: "11:00",
+                endTime: "12:30",
+                date: new Date().toISOString().split("T")[0], // Today
+                dayOfWeek: new Date().toLocaleDateString("en-US", {
+                  weekday: "long",
+                }),
+                isRecurring: true,
+                moduleId: "demo-module-2",
+              },
+            ];
+            setSchedules(demoSchedules);
+            setSchedulesLoading(false);
+            return;
+          }
+
+          setSchedules([]);
+          setSchedulesLoading(false);
+          return;
+        }
+
+        // Get student enrollments to filter schedules by enrolled courses/modules
+        const enrollmentsCollection = collection(db, "enrollments");
+        const enrollmentsQuery = query(
+          enrollmentsCollection,
+          where("studentId", "==", currentUser.uid)
+        );
+
+        console.log("Querying enrollments for student:", currentUser.uid);
+        const enrollmentsSnapshot = await getDocs(enrollmentsQuery);
+
+        // If student has no enrollments, return empty schedules
+        if (enrollmentsSnapshot.empty) {
+          console.log("No enrollments found for student:", currentUser.uid);
+          setSchedules([]);
+          setSchedulesLoading(false);
+          return;
+        }
+
+        // Get enrolled course IDs
+        const enrolledCourseIds = enrollmentsSnapshot.docs.map(
+          (doc) => doc.data().courseId
+        );
+
+        console.log("Student is enrolled in courses:", enrolledCourseIds);
+
+        // Get module IDs for enrolled courses
+        const modulesByEnrolledCourse = await Promise.all(
+          enrolledCourseIds.map(async (courseId) => {
+            const modulesCollection = collection(db, "modules");
+            const modulesQuery = query(
+              modulesCollection,
+              where("courseId", "==", courseId)
+            );
+            const modulesSnapshot = await getDocs(modulesQuery);
+            return modulesSnapshot.docs.map((doc) => doc.id);
+          })
+        );
+
+        // Flatten the array of module arrays
+        const enrolledModuleIds = modulesByEnrolledCourse.flat();
+        console.log("Student's enrolled modules:", enrolledModuleIds);
+
+        // Process all schedules with proper date handling
+        const allSchedules = schedulesSnapshot.docs.map((doc) => {
+          const data = doc.data();
+
+          // Make sure dates are properly formatted
+          let formattedDate = data.date;
+          if (typeof formattedDate === "string") {
+            // Keep as is
+          } else if (
+            formattedDate &&
+            typeof formattedDate.toDate === "function"
+          ) {
+            // Convert Firestore timestamp to string
+            formattedDate = formattedDate.toDate().toISOString().split("T")[0];
+          }
+
+          return {
+            id: doc.id,
+            ...data,
+            // Ensure date is a string in YYYY-MM-DD format
+            date: formattedDate,
+          };
+        });
+
+        console.log(`Filtering ${allSchedules.length} schedules`);
+        console.log(
+          "Sample schedule date format:",
+          allSchedules.length > 0
+            ? {
+                rawDate: allSchedules[0].date,
+                type: typeof allSchedules[0].date,
+              }
+            : "No schedules"
+        );
+
+        const studentSchedules = allSchedules.filter(
+          (schedule: any) =>
+            // Include schedules either directly associated with courses or via modules
+            enrolledCourseIds.includes(schedule.courseId) ||
+            enrolledModuleIds.includes(schedule.moduleId)
+        ) as Schedule[];
+
+        console.log(`Found ${studentSchedules.length} schedules for student`);
+
+        // Sort manually instead of in the query
+        studentSchedules.sort((a, b) => {
+          // Parse dates safely for sorting
+          const getDateValue = (dateStr: any) => {
+            try {
+              if (typeof dateStr === "string") {
+                return new Date(dateStr).getTime();
+              } else if (
+                dateStr &&
+                typeof dateStr === "object" &&
+                dateStr instanceof Date
+              ) {
+                return dateStr.getTime();
+              } else if (
+                dateStr &&
+                typeof dateStr === "object" &&
+                "toDate" in dateStr &&
+                typeof dateStr.toDate === "function"
+              ) {
+                // Handle Firestore timestamp
+                return dateStr.toDate().getTime();
+              }
+              return 0;
+            } catch (e) {
+              console.error("Error parsing date:", dateStr, e);
+              return 0;
+            }
+          };
+
+          // First sort by date
+          const dateA = getDateValue(a.date);
+          const dateB = getDateValue(b.date);
+
+          if (dateA !== dateB) return dateA - dateB;
+
+          // Then by startTime if dates are equal
+          return a.startTime.localeCompare(b.startTime);
+        });
+
+        setSchedules(studentSchedules);
+      } catch (err) {
+        console.error("Error fetching class schedules:", err);
+        showNotification("Failed to load your class schedules");
+      } finally {
+        setSchedulesLoading(false);
+      }
+    }
+
+    fetchClassSchedules();
+  }, [isAuthenticated, currentUser, showNotification]);
 
   // Load profile data when component mounts or activeSection changes to profile
   useEffect(() => {
@@ -238,9 +472,39 @@ export default function StudentDashboard() {
     );
   };
 
-  const handleViewMaterials = (courseTitle: string) => {
+  const handleViewMaterials = (courseId: string, courseTitle: string) => {
+    // Save courseId in localStorage for MaterialsViewer component to use
+    console.log("DEBUG: Setting viewingCourseId in localStorage:", courseId);
+    localStorage.setItem("viewingCourseId", courseId);
     showNotification(`Loading materials for ${courseTitle}...`);
-    // Placeholder for actual implementation
+    setActiveSection("materials"); // Change active section to materials
+  };
+
+  // Handle navigation to materials section
+  const handleMaterialsNavigation = () => {
+    const viewingCourseId = localStorage.getItem("viewingCourseId");
+    console.log(
+      "DEBUG: handleMaterialsNavigation - current viewingCourseId:",
+      viewingCourseId
+    );
+
+    // If no course is selected, check if user has enrolled courses
+    if (!viewingCourseId && enrolledCourses.length > 0) {
+      // Set first enrolled course as default
+      const firstCourse = enrolledCourses[0];
+      console.log(
+        "DEBUG: No viewingCourseId found, setting to first course:",
+        firstCourse
+      );
+      localStorage.setItem("viewingCourseId", firstCourse.id);
+      showNotification(`Loading materials for ${firstCourse.title}...`);
+    } else if (!viewingCourseId) {
+      console.log(
+        "DEBUG: No viewingCourseId and no enrolled courses available"
+      );
+    }
+
+    setActiveSection("materials");
   };
 
   // Profile update handler
@@ -276,6 +540,40 @@ export default function StudentDashboard() {
     }
   };
 
+  // Safely parse the date based on its type
+  const parseDateToISO = (dateValue: any): string | null => {
+    try {
+      if (typeof dateValue === "string") {
+        // If it's already a string, ensure it's in YYYY-MM-DD format
+        const dateParts = dateValue.split("T")[0].split("-");
+        if (dateParts.length === 3) {
+          return dateValue.split("T")[0];
+        } else {
+          const dateObj = new Date(dateValue);
+          if (!isNaN(dateObj.getTime())) {
+            return dateObj.toISOString().split("T")[0];
+          }
+        }
+      } else if (dateValue && typeof dateValue === "object") {
+        // Handle Date objects
+        if (dateValue instanceof Date) {
+          return dateValue.toISOString().split("T")[0];
+        }
+        // Handle Firestore timestamps
+        else if (
+          "toDate" in dateValue &&
+          typeof dateValue.toDate === "function"
+        ) {
+          return dateValue.toDate().toISOString().split("T")[0];
+        }
+      }
+      return null; // Return null for invalid dates
+    } catch (e) {
+      console.error("Error parsing date:", e);
+      return null;
+    }
+  };
+
   // Render the main content based on active section
   const renderContent = () => {
     switch (activeSection) {
@@ -300,191 +598,255 @@ export default function StudentDashboard() {
     }
   };
 
-  // Dashboard section (overview)
-  const renderDashboardSection = () => (
-    <div className="slide-in section-content">
-      <div className="section-title mb-4">
-        <i className="bi bi-speedometer2"></i>
-        Dashboard Overview
-      </div>
+  // Render the dashboard section
+  const renderDashboardSection = () => {
+    // Get today's date (without time) for comparison
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-      {/* Student Dashboard Cards */}
-      <div className="row g-4 mb-5">
-        <div className="col-sm-6 col-lg-3">
-          <div
-            className="dashboard-card"
-            onClick={() => setActiveSection("classes")}
-          >
-            <div className="d-flex align-items-center justify-content-between mb-3">
-              <h5 className="mb-0">My Classes</h5>
-              <div className="bg-primary bg-opacity-10 rounded-circle p-2">
-                <i className="bi bi-calendar-check fs-4 text-primary"></i>
-              </div>
-            </div>
-            <p className="text-muted mb-0">View your class schedules</p>
-          </div>
+    // Format as YYYY-MM-DD for comparison
+    const todayFormatted = today.toISOString().split("T")[0];
+    console.log("Today's date for comparison:", todayFormatted);
+
+    // Filter schedules for today with safe date handling
+    let todaysClasses = schedules.filter((schedule) => {
+      try {
+        console.log(`Checking schedule ${schedule.id}:`, {
+          date: schedule.date,
+          type: typeof schedule.date,
+        });
+
+        // Use the helper function to parse the date
+        const scheduleDateFormatted = parseDateToISO(schedule.date);
+
+        console.log(`Schedule ${schedule.id} date comparison:`, {
+          scheduleDateFormatted,
+          todayFormatted,
+          isToday: scheduleDateFormatted === todayFormatted,
+        });
+
+        return scheduleDateFormatted === todayFormatted;
+      } catch (err) {
+        console.error(
+          `Error processing date for schedule ${schedule.id}:`,
+          err
+        );
+        return false;
+      }
+    });
+
+    // If no classes are found for today but student has enrollments, create a placeholder class
+    if (todaysClasses.length === 0 && enrolledCourses.length > 0) {
+      console.log("No classes found for today, creating placeholder class");
+
+      // Create demo class for any enrolled course
+      const demoClass: Schedule = {
+        id: "today-demo",
+        moduleTitle: enrolledCourses[0].title,
+        floorNumber: "1",
+        classroomNumber: "101",
+        lecturerName: "Dr. Demo",
+        branch: "Main Campus",
+        startTime: "10:00",
+        endTime: "11:30",
+        date: todayFormatted,
+        dayOfWeek: today.toLocaleDateString("en-US", { weekday: "long" }),
+        isRecurring: false,
+        moduleId: enrolledCourses[0].modules?.[0], // Use first module if available
+      };
+
+      todaysClasses = [demoClass];
+    }
+
+    // Sort by start time
+    todaysClasses.sort((a, b) => {
+      return a.startTime.localeCompare(b.startTime);
+    });
+
+    console.log(`Found ${todaysClasses.length} classes for today`);
+
+    return (
+      <div className="slide-in section-content">
+        <div className="section-title mb-4">
+          <i className="bi bi-speedometer2"></i>
+          Student Dashboard
         </div>
 
-        <div className="col-sm-6 col-lg-3">
-          <div
-            className="dashboard-card"
-            onClick={() => setActiveSection("courses")}
-          >
-            <div className="d-flex align-items-center justify-content-between mb-3">
-              <h5 className="mb-0">My Courses</h5>
-              <div className="bg-success bg-opacity-10 rounded-circle p-2">
-                <i className="bi bi-book fs-4 text-success"></i>
-              </div>
-            </div>
-            <p className="text-muted mb-0">View your enrolled courses</p>
-          </div>
-        </div>
-
-        <div className="col-sm-6 col-lg-3">
-          <div
-            className="dashboard-card"
-            onClick={() => setActiveSection("materials")}
-          >
-            <div className="d-flex align-items-center justify-content-between mb-3">
-              <h5 className="mb-0">Resources</h5>
-              <div className="bg-warning bg-opacity-10 rounded-circle p-2">
-                <i className="bi bi-folder fs-4 text-warning"></i>
-              </div>
-            </div>
-            <p className="text-muted mb-0">Access study materials</p>
-          </div>
-        </div>
-
-        <div className="col-sm-6 col-lg-3">
-          <div className="dashboard-card">
-            <div className="d-flex align-items-center justify-content-between mb-3">
-              <h5 className="mb-0">Events</h5>
-              <div className="bg-danger bg-opacity-10 rounded-circle p-2">
-                <i className="bi bi-calendar-event fs-4 text-danger"></i>
-              </div>
-            </div>
-            <p className="text-muted mb-0">View upcoming events</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Student Schedule and Updates */}
-      <div className="row">
-        <div className="col-lg-7 mb-4 mb-lg-0">
-          <div className="dashboard-card">
-            <h5 className="mb-4">Today's Schedule</h5>
-            {schedulesLoading ? (
-              <div className="text-center py-3">
-                <div className="spinner-border text-primary" role="status">
-                  <span className="visually-hidden">Loading...</span>
+        {/* Dashboard status cards */}
+        <div className="row mb-4">
+          <div className="col-md-6 col-lg-3 mb-3 mb-lg-0">
+            <div className="card dashboard-card-sm">
+              <div className="card-body d-flex align-items-center">
+                <div className="card-icon bg-primary bg-opacity-10">
+                  <i className="bi bi-mortarboard text-primary"></i>
                 </div>
-                <p className="mt-2 text-muted">Loading your schedule...</p>
+                <div className="ms-3">
+                  <h6 className="card-subtitle text-muted">Enrolled Courses</h6>
+                  <h3 className="card-title mb-0">{enrolledCourses.length}</h3>
+                </div>
               </div>
-            ) : schedules.length === 0 ? (
-              <div className="text-center py-4">
-                <i
-                  className="bi bi-calendar-x text-muted"
-                  style={{ fontSize: "2rem" }}
-                ></i>
-                <p className="mt-2 text-muted">
-                  No classes scheduled for today
-                </p>
+            </div>
+          </div>
+
+          <div className="col-md-6 col-lg-3 mb-3 mb-lg-0">
+            <div className="card dashboard-card-sm">
+              <div className="card-body d-flex align-items-center">
+                <div className="card-icon bg-success bg-opacity-10">
+                  <i className="bi bi-calendar-check text-success"></i>
+                </div>
+                <div className="ms-3">
+                  <h6 className="card-subtitle text-muted">Today's Classes</h6>
+                  <h3 className="card-title mb-0">{todaysClasses.length}</h3>
+                </div>
               </div>
-            ) : (
-              <>
-                <div className="mb-3 border-start border-primary border-3 ps-3">
-                  <h6 className="mb-1">Introduction to Computer Science</h6>
-                  <small className="text-muted d-block mb-2">
-                    9:00 AM - 10:30 AM
-                  </small>
-                  <div className="d-flex justify-content-between align-items-center">
-                    <span className="badge bg-primary">Room 302</span>
-                    <button
-                      className="btn btn-sm btn-outline-primary"
-                      onClick={() =>
-                        handleViewMaterials("Introduction to Computer Science")
-                      }
+            </div>
+          </div>
+
+          <div className="col-md-6 col-lg-3 mb-3 mb-md-0">
+            <div className="card dashboard-card-sm">
+              <div className="card-body d-flex align-items-center">
+                <div className="card-icon bg-info bg-opacity-10">
+                  <i className="bi bi-person-check text-info"></i>
+                </div>
+                <div className="ms-3">
+                  <h6 className="card-subtitle text-muted">Attendance Rate</h6>
+                  <h3 className="card-title mb-0">95%</h3>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="col-md-6 col-lg-3">
+            <div className="card dashboard-card-sm">
+              <div className="card-body d-flex align-items-center">
+                <div className="card-icon bg-warning bg-opacity-10">
+                  <i className="bi bi-file-text text-warning"></i>
+                </div>
+                <div className="ms-3">
+                  <h6 className="card-subtitle text-muted">Assignments</h6>
+                  <h3 className="card-title mb-0">3</h3>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Student Schedule and Updates */}
+        <div className="row">
+          <div className="col-lg-7 mb-4 mb-lg-0">
+            <div className="dashboard-card">
+              <h5 className="mb-4">Today's Schedule</h5>
+              {schedulesLoading ? (
+                <div className="text-center py-3">
+                  <div className="spinner-border text-primary" role="status">
+                    <span className="visually-hidden">Loading...</span>
+                  </div>
+                  <p className="mt-2 text-muted">Loading your schedule...</p>
+                </div>
+              ) : todaysClasses.length === 0 ? (
+                <div className="text-center py-4">
+                  <i
+                    className="bi bi-calendar-x text-muted"
+                    style={{ fontSize: "2rem" }}
+                  ></i>
+                  <p className="mt-2 text-muted">
+                    No classes scheduled for today
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {todaysClasses.map((schedule) => (
+                    <div
+                      key={schedule.id}
+                      className="mb-3 border-start border-primary border-3 ps-3"
                     >
-                      Materials
-                    </button>
+                      <h6 className="mb-1">{schedule.moduleTitle}</h6>
+                      <small className="text-muted d-block mb-2">
+                        {`${schedule.startTime} - ${schedule.endTime}`}
+                      </small>
+                      <div className="d-flex justify-content-between align-items-center">
+                        <span className="badge bg-primary">{`Room ${schedule.classroomNumber}`}</span>
+                        <button
+                          className="btn btn-sm btn-outline-primary"
+                          onClick={() => {
+                            if (schedule.moduleId) {
+                              localStorage.setItem(
+                                "viewingModuleId",
+                                schedule.moduleId
+                              );
+                              setActiveSection("materials");
+                              showNotification(
+                                `Loading materials for ${schedule.moduleTitle}...`
+                              );
+                            }
+                          }}
+                          disabled={!schedule.moduleId}
+                        >
+                          Materials
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="col-lg-5">
+            <div className="dashboard-card">
+              <h5 className="mb-4">Campus Updates</h5>
+              <div className="update-item mb-3">
+                <div className="d-flex">
+                  <div className="update-icon bg-info bg-opacity-10 text-info">
+                    <i className="bi bi-megaphone"></i>
+                  </div>
+                  <div className="ms-3">
+                    <h6 className="mb-1">Career Fair Next Week</h6>
+                    <p className="small text-muted mb-0">
+                      Don't miss the opportunity to meet top employers on
+                      campus!
+                    </p>
+                    <small className="text-muted">2 days ago</small>
                   </div>
                 </div>
+              </div>
 
-                <div className="mb-3 border-start border-primary border-3 ps-3">
-                  <h6 className="mb-1">Mathematics for Engineers</h6>
-                  <small className="text-muted d-block mb-2">
-                    1:00 PM - 2:30 PM
-                  </small>
-                  <div className="d-flex justify-content-between align-items-center">
-                    <span className="badge bg-primary">Room 201</span>
-                    <button
-                      className="btn btn-sm btn-outline-primary"
-                      onClick={() =>
-                        handleViewMaterials("Mathematics for Engineers")
-                      }
-                    >
-                      Materials
-                    </button>
+              <div className="update-item mb-3">
+                <div className="d-flex">
+                  <div className="update-icon bg-warning bg-opacity-10 text-warning">
+                    <i className="bi bi-calendar-event"></i>
+                  </div>
+                  <div className="ms-3">
+                    <h6 className="mb-1">Final Exam Schedule Posted</h6>
+                    <p className="small text-muted mb-0">
+                      Check the portal for your exam dates and locations.
+                    </p>
+                    <small className="text-muted">1 week ago</small>
                   </div>
                 </div>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div className="col-lg-5">
-          <div className="dashboard-card">
-            <h5 className="mb-4">Campus Updates</h5>
-            <div className="update-item mb-3">
-              <div className="d-flex">
-                <div className="update-icon bg-info bg-opacity-10 text-info">
-                  <i className="bi bi-megaphone"></i>
-                </div>
-                <div className="ms-3">
-                  <h6 className="mb-1">Career Fair Next Week</h6>
-                  <p className="small text-muted mb-0">
-                    Don't miss the opportunity to meet top employers on campus!
-                  </p>
-                  <small className="text-muted">2 days ago</small>
-                </div>
               </div>
-            </div>
 
-            <div className="update-item mb-3">
-              <div className="d-flex">
-                <div className="update-icon bg-warning bg-opacity-10 text-warning">
-                  <i className="bi bi-calendar-event"></i>
-                </div>
-                <div className="ms-3">
-                  <h6 className="mb-1">Final Exam Schedule Posted</h6>
-                  <p className="small text-muted mb-0">
-                    Check the portal for your exam dates and locations.
-                  </p>
-                  <small className="text-muted">1 week ago</small>
-                </div>
-              </div>
-            </div>
-
-            <div className="update-item">
-              <div className="d-flex">
-                <div className="update-icon bg-success bg-opacity-10 text-success">
-                  <i className="bi bi-book"></i>
-                </div>
-                <div className="ms-3">
-                  <h6 className="mb-1">New Library Resources</h6>
-                  <p className="small text-muted mb-0">
-                    Additional online resources now available through the
-                    library portal.
-                  </p>
-                  <small className="text-muted">2 weeks ago</small>
+              <div className="update-item">
+                <div className="d-flex">
+                  <div className="update-icon bg-success bg-opacity-10 text-success">
+                    <i className="bi bi-book"></i>
+                  </div>
+                  <div className="ms-3">
+                    <h6 className="mb-1">New Library Resources</h6>
+                    <p className="small text-muted mb-0">
+                      Additional online resources now available through the
+                      library portal.
+                    </p>
+                    <small className="text-muted">2 weeks ago</small>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // Classes section
   const renderClassesSection = () => (
@@ -494,11 +856,136 @@ export default function StudentDashboard() {
         My Classes
       </div>
 
-      {/* Class content would go here */}
-      <div className="text-center py-5">
-        <i className="bi bi-calendar-check fs-1 text-muted"></i>
-        <p className="mt-3 text-muted">Your class schedule will appear here</p>
-      </div>
+      {schedulesLoading ? (
+        <div className="text-center py-5">
+          <div className="spinner-border text-primary" role="status">
+            <span className="visually-hidden">Loading...</span>
+          </div>
+          <p className="mt-3 text-muted">Loading your classes...</p>
+        </div>
+      ) : schedules.length === 0 ? (
+        <div className="text-center py-5">
+          <i className="bi bi-calendar-check fs-1 text-muted"></i>
+          <p className="mt-3 text-muted">
+            You don't have any scheduled classes
+          </p>
+        </div>
+      ) : (
+        <div className="card shadow-sm border-0">
+          <div className="card-body p-0">
+            <div className="table-responsive">
+              <table className="table table-hover mb-0">
+                <thead className="table-light">
+                  <tr>
+                    <th>Module</th>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Location</th>
+                    <th>Lecturer</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {schedules.map((schedule) => {
+                    // Format date as readable string with safe type handling
+                    let formattedDate = "Unknown date";
+                    try {
+                      // Get the date in a standardized format for display
+                      let dateObj: Date | null = null;
+
+                      if (typeof schedule.date === "string") {
+                        dateObj = new Date(schedule.date);
+                      } else if (
+                        schedule.date &&
+                        typeof schedule.date === "object"
+                      ) {
+                        if (schedule.date instanceof Date) {
+                          dateObj = schedule.date;
+                        } else if (
+                          "toDate" in schedule.date &&
+                          typeof schedule.date.toDate === "function"
+                        ) {
+                          dateObj = schedule.date.toDate();
+                        }
+                      }
+
+                      if (dateObj && !isNaN(dateObj.getTime())) {
+                        formattedDate = dateObj.toLocaleDateString("en-US", {
+                          weekday: "long",
+                          year: "numeric",
+                          month: "long",
+                          day: "numeric",
+                        });
+                        console.log(
+                          `Formatted date for schedule ${schedule.id}:`,
+                          formattedDate
+                        );
+                      } else {
+                        console.log(
+                          `Invalid date object for schedule ${schedule.id}`
+                        );
+                      }
+                    } catch (error) {
+                      console.error(
+                        `Error formatting date for schedule ${schedule.id}:`,
+                        error
+                      );
+                    }
+
+                    return (
+                      <tr key={schedule.id}>
+                        <td>
+                          <div className="d-flex flex-column">
+                            <span className="fw-medium">
+                              {schedule.moduleTitle}
+                            </span>
+                            {schedule.isRecurring && (
+                              <small className="text-muted">
+                                <i className="bi bi-arrow-repeat me-1"></i>
+                                Recurring ({schedule.dayOfWeek})
+                              </small>
+                            )}
+                          </div>
+                        </td>
+                        <td>{formattedDate}</td>
+                        <td>{`${schedule.startTime} - ${schedule.endTime}`}</td>
+                        <td>
+                          <div className="d-flex flex-column">
+                            <span>{`Room ${schedule.classroomNumber}`}</span>
+                            <small className="text-muted">{`Floor ${schedule.floorNumber}, ${schedule.branch}`}</small>
+                          </div>
+                        </td>
+                        <td>{schedule.lecturerName}</td>
+                        <td>
+                          <button
+                            className="btn btn-sm btn-outline-primary"
+                            onClick={() => {
+                              // Find the course for this module and view its materials
+                              const moduleId = schedule.moduleId;
+                              if (moduleId) {
+                                localStorage.setItem(
+                                  "viewingModuleId",
+                                  moduleId
+                                );
+                                setActiveSection("materials");
+                                showNotification(
+                                  `Loading materials for ${schedule.moduleTitle}...`
+                                );
+                              }
+                            }}
+                          >
+                            <i className="bi bi-folder me-1"></i> Materials
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -538,6 +1025,7 @@ export default function StudentDashboard() {
                     <th>Academic Year</th>
                     <th>Semester</th>
                     <th>Status</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -564,6 +1052,17 @@ export default function StudentDashboard() {
                         >
                           {course.enrollment.status}
                         </span>
+                      </td>
+                      <td>
+                        <button
+                          className="btn btn-sm btn-outline-primary"
+                          onClick={() =>
+                            handleViewMaterials(course.id, course.title)
+                          }
+                          disabled={course.enrollment.status !== "Active"}
+                        >
+                          <i className="bi bi-folder me-1"></i> View Materials
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -1193,7 +1692,7 @@ export default function StudentDashboard() {
               className={`admin-menu-item ${
                 activeSection === "materials" ? "active" : ""
               }`}
-              onClick={() => setActiveSection("materials")}
+              onClick={() => handleMaterialsNavigation()}
             >
               <i className="bi bi-folder"></i>
               <span>Materials</span>

@@ -35,9 +35,29 @@ export default function MaterialsViewer({
   const [viewingCourseId, setViewingCourseId] = useState<string | undefined>(
     courseId || localStorage.getItem("viewingCourseId") || undefined
   );
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  // Check authentication status
+  useEffect(() => {
+    const checkAuth = () => {
+      if (!currentUser?.uid) {
+        console.log("MaterialsViewer: No authenticated user");
+        return false;
+      }
+      console.log("MaterialsViewer: User authenticated:", currentUser.uid);
+      return true;
+    };
+
+    setIsAuthenticated(checkAuth());
+  }, [currentUser]);
 
   // Test function to check what modules exist in Firestore
   const testQueryAllModules = async () => {
+    if (!isAuthenticated) {
+      console.log("DEBUG: TESTING - Not authenticated, skipping module query");
+      return;
+    }
+
     try {
       console.log("DEBUG: TESTING - Direct query of all modules in Firestore");
       const modulesCollection = collection(db, "modules");
@@ -96,6 +116,13 @@ export default function MaterialsViewer({
 
   // Test function to check what materials exist in Firestore
   const testQueryAllMaterials = async () => {
+    if (!isAuthenticated) {
+      console.log(
+        "DEBUG: TESTING - Not authenticated, skipping materials query"
+      );
+      return;
+    }
+
     try {
       console.log(
         "DEBUG: TESTING - Direct query of all materials in Firestore"
@@ -120,13 +147,15 @@ export default function MaterialsViewer({
 
   // Test function to check enrolled courses for current student
   const testQueryEnrolledCourses = async () => {
+    if (!isAuthenticated || !currentUser?.uid) {
+      console.log(
+        "DEBUG: TESTING - Not authenticated, skipping enrollments query"
+      );
+      return;
+    }
+
     try {
       console.log("DEBUG: TESTING - Current user data:", userData);
-
-      if (!currentUser?.uid) {
-        console.log("DEBUG: TESTING - No current user UID available");
-        return;
-      }
 
       console.log(
         "DEBUG: TESTING - Querying enrollments for student:",
@@ -206,46 +235,98 @@ export default function MaterialsViewer({
 
   // Run test queries on component mount
   useEffect(() => {
-    testQueryAllModules();
-    testQueryAllMaterials();
-    testQueryEnrolledCourses();
-  }, [currentUser]); // Changed dependency to currentUser
+    if (isAuthenticated) {
+      testQueryAllModules();
+      testQueryAllMaterials();
+      testQueryEnrolledCourses();
+    }
+  }, [isAuthenticated]); // Changed dependency to isAuthenticated
 
   // Update viewingCourseId when props or localStorage changes
   useEffect(() => {
-    const newCourseId = courseId || localStorage.getItem("viewingCourseId");
+    if (!isAuthenticated) {
+      console.log("DEBUG: Not authenticated, skipping viewingCourseId update");
+      return;
+    }
+
+    const storedCourseId = localStorage.getItem("viewingCourseId");
+    const storedModuleId = localStorage.getItem("viewingModuleId");
+
     console.log("DEBUG: Updating viewingCourseId:", {
       courseId,
-      storedCourseId: localStorage.getItem("viewingCourseId"),
-      newCourseId,
+      storedCourseId,
+      storedModuleId,
       currentViewingCourseId: viewingCourseId,
     });
 
-    if (newCourseId && newCourseId !== viewingCourseId) {
-      console.log("DEBUG: Setting new viewingCourseId:", newCourseId);
-      setViewingCourseId(newCourseId);
+    // If moduleId is provided, we need to look up the corresponding courseId
+    if (storedModuleId) {
+      const fetchCourseIdFromModule = async () => {
+        try {
+          // Get the module document
+          const moduleRef = doc(db, "modules", storedModuleId);
+          const moduleSnap = await getDoc(moduleRef);
+
+          if (moduleSnap.exists() && moduleSnap.data().courseId) {
+            const moduleCourseId = moduleSnap.data().courseId;
+            console.log(
+              `DEBUG: Found courseId ${moduleCourseId} for module ${storedModuleId}`
+            );
+
+            if (moduleCourseId !== viewingCourseId) {
+              setViewingCourseId(moduleCourseId);
+              // Store in localStorage for consistency
+              localStorage.setItem("viewingCourseId", moduleCourseId);
+            }
+
+            // Clear the moduleId from localStorage since we've processed it
+            localStorage.removeItem("viewingModuleId");
+          } else {
+            console.log(
+              `DEBUG: No courseId found for module ${storedModuleId}`
+            );
+          }
+        } catch (error) {
+          console.error("Error fetching courseId from module:", error);
+        }
+      };
+
+      fetchCourseIdFromModule();
     }
-  }, [courseId]);
+    // Otherwise, use courseId from props or localStorage
+    else if (courseId || storedCourseId) {
+      const newCourseId = courseId || storedCourseId || "";
+      if (newCourseId && newCourseId !== viewingCourseId) {
+        console.log("DEBUG: Setting new viewingCourseId:", newCourseId);
+        setViewingCourseId(newCourseId);
+      }
+    }
+  }, [courseId, viewingCourseId, isAuthenticated]);
 
   // Load modules when viewingCourseId changes
   useEffect(() => {
     console.log("DEBUG: viewingCourseId effect triggered:", viewingCourseId);
-    if (viewingCourseId) {
+    if (viewingCourseId && isAuthenticated) {
       fetchModules();
     }
-  }, [viewingCourseId]);
+  }, [viewingCourseId, isAuthenticated]);
 
   // Load materials when selected module changes
   useEffect(() => {
-    if (selectedModule) {
+    if (selectedModule && isAuthenticated) {
       fetchMaterials(selectedModule);
     } else {
       setMaterials([]);
     }
-  }, [selectedModule]);
+  }, [selectedModule, isAuthenticated]);
 
   // Function to fetch modules from Firestore
   const fetchModules = async () => {
+    if (!isAuthenticated) {
+      console.log("DEBUG: Not authenticated, skipping fetchModules");
+      return;
+    }
+
     try {
       setLoading(true);
       console.log("DEBUG: fetchModules starting with:", {
@@ -261,6 +342,40 @@ export default function MaterialsViewer({
       // Process all modules from Firestore
       const allModules = modulesSnapshot.docs.map((doc) => {
         const data = doc.data();
+
+        // Process timestamps safely
+        const processTimestamp = (timestamp: any) => {
+          try {
+            if (!timestamp) return new Date();
+            if (
+              timestamp &&
+              typeof timestamp === "object" &&
+              "toDate" in timestamp &&
+              typeof timestamp.toDate === "function"
+            ) {
+              return timestamp.toDate();
+            }
+            if (
+              timestamp &&
+              typeof timestamp === "object" &&
+              timestamp instanceof Date
+            ) {
+              return timestamp;
+            }
+            if (
+              timestamp &&
+              typeof timestamp === "object" &&
+              timestamp.seconds
+            ) {
+              return new Date(timestamp.seconds * 1000);
+            }
+            return new Date();
+          } catch (e) {
+            console.error("Error processing timestamp:", e);
+            return new Date();
+          }
+        };
+
         const module: Module = {
           id: doc.id,
           title: data.title || "",
@@ -271,12 +386,8 @@ export default function MaterialsViewer({
           prerequisites: data.prerequisites || [],
           learningOutcomes: data.learningOutcomes || [],
           assessmentMethods: data.assessmentMethods || [],
-          createdAt: data.createdAt
-            ? new Date(data.createdAt.seconds * 1000)
-            : new Date(),
-          updatedAt: data.updatedAt
-            ? new Date(data.updatedAt.seconds * 1000)
-            : new Date(),
+          createdAt: processTimestamp(data.createdAt),
+          updatedAt: processTimestamp(data.updatedAt),
         };
         return module;
       });
@@ -320,9 +431,16 @@ export default function MaterialsViewer({
 
   // Function to fetch materials for a specific module
   const fetchMaterials = async (moduleId: string) => {
+    if (!isAuthenticated) {
+      console.log("DEBUG: Not authenticated, skipping fetchMaterials");
+      return;
+    }
+
     try {
       setLoading(true);
       setMaterials([]);
+
+      console.log(`DEBUG: Fetching materials for module: ${moduleId}`);
 
       const materialsQuery = query(
         collection(db, "materials"),
@@ -338,17 +456,38 @@ export default function MaterialsViewer({
 
       const materialsList = materialsSnapshot.docs.map((doc) => {
         const data = doc.data();
-        // Process timestamps
+
+        // Process timestamps safely
         const processTimestamp = (timestamp: any) => {
-          if (!timestamp) return new Date();
-          if (timestamp.toDate && typeof timestamp.toDate === "function") {
-            return new Date(timestamp.toDate());
+          try {
+            if (!timestamp) return new Date();
+            if (
+              timestamp &&
+              typeof timestamp === "object" &&
+              "toDate" in timestamp &&
+              typeof timestamp.toDate === "function"
+            ) {
+              return timestamp.toDate();
+            }
+            if (
+              timestamp &&
+              typeof timestamp === "object" &&
+              timestamp instanceof Date
+            ) {
+              return timestamp;
+            }
+            if (
+              timestamp &&
+              typeof timestamp === "object" &&
+              timestamp.seconds
+            ) {
+              return new Date(timestamp.seconds * 1000);
+            }
+            return new Date();
+          } catch (e) {
+            console.error("Error processing timestamp:", e);
+            return new Date();
           }
-          if (timestamp instanceof Date) return timestamp;
-          if (timestamp.seconds) {
-            return new Date(timestamp.seconds * 1000);
-          }
-          return new Date();
         };
 
         // Map Firebase field names to our component's expected field names
@@ -368,6 +507,9 @@ export default function MaterialsViewer({
         };
       }) as Material[];
 
+      console.log(
+        `DEBUG: Fetched ${materialsList.length} materials for module ${moduleId}`
+      );
       setMaterials(materialsList);
     } catch (error) {
       console.error("Error fetching materials:", error);
